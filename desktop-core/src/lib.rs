@@ -4,6 +4,7 @@ use std::{fs::{self, File, OpenOptions}, io::{Read, Write}, path::{Path, PathBuf
 use thiserror::Error;
 
 pub mod bridge_contract;
+pub mod native_api;
 
 #[derive(Debug, Error)]
 pub enum SafeCopyError {
@@ -75,8 +76,6 @@ pub fn copy_verify_rename(source: &Path, destination: &Path, verify_hash: bool) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
-
     #[test]
     fn bridge_contract_serializes() {
         let request = crate::bridge_contract::RenameJobRequest { source_dir: "C:/src".into(), destination_dir: "D:/dst".into(), timezone: "UTC".into(), manual_offset_minutes: Some(-180), verify_hash: true };
@@ -84,7 +83,6 @@ mod tests {
         assert_eq!(value["sourceDir"], "C:/src");
         assert_eq!(value["manualOffsetMinutes"], -180);
     }
-
     #[test]
     fn preview_status_serializes_stably() {
         assert_eq!(serde_json::to_string(&crate::bridge_contract::PreviewStatus::Ready).unwrap(), "\"ready\"");
