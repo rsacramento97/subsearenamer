@@ -10,3 +10,4 @@ hex = "0.4"
 walkdir = "2.5"
 thiserror = "2"
 fs2 = "0.4"
+serde = { version = "1", features = ["derive"] }
