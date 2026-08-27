@@ -1,6 +1,6 @@
 [package]
 name = "subsea-renamer-core"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Safe copy, verify and rename engine for SubSeaRenamer"
 
@@ -9,3 +9,4 @@ sha2 = "0.10"
 hex = "0.4"
 walkdir = "2.5"
 thiserror = "2"
+fs2 = "0.4"
