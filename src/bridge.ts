@@ -17,12 +17,9 @@ export type RenameJobResult = {
   completed: number;
   failed: number;
   cancelled: boolean;
+  errors?: string[];
 };
 
-/**
- * Native boundary. In browser/preview mode it is intentionally unavailable:
- * filesystem mutation must never be simulated by the web UI.
- */
 export interface NativeRenamerBridge {
   preview(request: RenameJobRequest): Promise<RenamePreview[]>;
   execute(request: RenameJobRequest): Promise<RenameJobResult>;
@@ -32,4 +29,10 @@ export interface NativeRenamerBridge {
 export function getNativeRenamerBridge(): NativeRenamerBridge | null {
   const candidate = (globalThis as { __SUBSEA_RENAMER__?: NativeRenamerBridge }).__SUBSEA_RENAMER__;
   return candidate ?? null;
+}
+
+export function requireNativeRenamerBridge(): NativeRenamerBridge {
+  const bridge = getNativeRenamerBridge();
+  if (!bridge) throw new Error('Operação disponível somente no aplicativo desktop.');
+  return bridge;
 }
