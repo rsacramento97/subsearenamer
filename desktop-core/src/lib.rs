@@ -59,8 +59,8 @@ fn normalized_destination(path: &Path) -> Result<PathBuf, SafeCopyError> {
     ))
 }
 
-/// Reject only a destination directory that is actually inside the source directory.
-/// A sibling destination (or a destination parent above the source) is safe and allowed.
+/// Reject a destination directory that is actually inside the source directory.
+/// A sibling destination is safe and allowed.
 fn ensure_destination_is_outside_source(source: &Path, destination: &Path) -> Result<(), SafeCopyError> {
     let source_root = fs::canonicalize(
         source.parent().ok_or(SafeCopyError::InvalidSource)?
@@ -81,8 +81,10 @@ fn unique_temp_path(parent: &Path, final_name: &str) -> PathBuf {
     parent.join(format!(".{final_name}.{stamp}-{}.subsea-partial", std::process::id()))
 }
 
-/// Copies bytes to a new file, verifies size and optionally SHA-256, then atomically renames
+/// Copies bytes to a new file, verifies size and optionally SHA-256, then renames
 /// the temporary copy to its requested destination. The source is never modified.
+/// When hashing is enabled, the source is hashed both before and after the copy;
+/// this detects a source file changing while it is being copied.
 pub fn copy_verify_rename(
     source: &Path,
     destination: &Path,
@@ -109,6 +111,8 @@ pub fn copy_verify_rename(
     if available < required {
         return Err(SafeCopyError::InsufficientSpace { required, available });
     }
+
+    let source_hash_before = if verify_hash { Some(sha256_file(source)?) } else { None };
 
     let temp = unique_temp_path(parent, destination.file_name().unwrap().to_string_lossy().as_ref());
     let mut input = File::open(source)?;
@@ -143,14 +147,18 @@ pub fn copy_verify_rename(
         return Err(SafeCopyError::IntegrityMismatch);
     }
 
-    let source_hash = if verify_hash { Some(sha256_file(source)?) } else { None };
-    if let Some(expected) = &source_hash {
+    let source_hash = if verify_hash {
+        let after = sha256_file(source)?;
+        let before = source_hash_before.as_ref().expect("hash enabled");
         let actual = sha256_file(&temp)?;
-        if &actual != expected {
+        if &after != before || &actual != before {
             let _ = fs::remove_file(&temp);
             return Err(SafeCopyError::IntegrityMismatch);
         }
-    }
+        Some(after)
+    } else {
+        None
+    };
 
     if destination.exists() {
         let _ = fs::remove_file(&temp);
