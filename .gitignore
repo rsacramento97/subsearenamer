@@ -1,0 +1,19 @@
+node_modules/
+dist/
+*.log
+.env
+.env.*
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Desktop build artifacts
+src-tauri/target/
+release/
+*.msi
+*.exe
+*.nsis.zip
+
+# Local project/session data
+.subsearenamer/
