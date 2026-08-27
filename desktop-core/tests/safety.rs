@@ -33,6 +33,23 @@ fn copies_and_verifies_without_touching_source() {
 }
 
 #[test]
+fn allows_safe_sibling_destination() {
+    let root = test_root("sibling");
+    let source_dir = root.join("SOURCE");
+    let destination_dir = root.join("RENAMED_VIDEOS");
+    fs::create_dir_all(&source_dir).unwrap();
+    let source = source_dir.join("original.mp4");
+    let destination = destination_dir.join("renamed.mp4");
+    fs::write(&source, b"sibling destination is safe").unwrap();
+
+    let result = copy_verify_rename(&source, &destination, true);
+    assert!(result.is_ok());
+    assert_eq!(fs::read(&source).unwrap(), b"sibling destination is safe");
+    assert_eq!(fs::read(&destination).unwrap(), b"sibling destination is safe");
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
 fn rejects_destination_inside_source_tree() {
     let root = test_root("overlap");
     let source_dir = root.join("SOURCE");

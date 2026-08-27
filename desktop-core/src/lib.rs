@@ -42,9 +42,7 @@ fn sha256_file(path: &Path) -> Result<String, SafeCopyError> {
     let mut buffer = [0u8; 1024 * 1024];
     loop {
         let read = file.read(&mut buffer)?;
-        if read == 0 {
-            break;
-        }
+        if read == 0 { break; }
         hasher.update(&buffer[..read]);
     }
     Ok(hex::encode(hasher.finalize()))
@@ -61,17 +59,16 @@ fn normalized_destination(path: &Path) -> Result<PathBuf, SafeCopyError> {
     ))
 }
 
-fn ensure_trees_are_separate(source: &Path, destination: &Path) -> Result<(), SafeCopyError> {
-    let source_root = fs::canonicalize(source)?.parent().map(Path::to_path_buf).ok_or(SafeCopyError::InvalidSource)?;
+/// Reject a destination directory that is actually inside the source directory.
+/// A sibling destination is safe and allowed.
+fn ensure_destination_is_outside_source(source: &Path, destination: &Path) -> Result<(), SafeCopyError> {
+    let source_root = fs::canonicalize(
+        source.parent().ok_or(SafeCopyError::InvalidSource)?
+    )?;
     let destination_parent = canonical_parent(destination)?;
-    let source_root = fs::canonicalize(source_root)?;
-    let destination_parent = fs::canonicalize(destination_parent)?;
 
-    if destination_parent.starts_with(&source_root) {
+    if destination_parent != source_root && destination_parent.starts_with(&source_root) {
         return Err(SafeCopyError::DestinationInsideSource);
-    }
-    if source_root.starts_with(&destination_parent) {
-        return Err(SafeCopyError::SourceInsideDestination);
     }
     Ok(())
 }
@@ -84,24 +81,25 @@ fn unique_temp_path(parent: &Path, final_name: &str) -> PathBuf {
     parent.join(format!(".{final_name}.{stamp}-{}.subsea-partial", std::process::id()))
 }
 
-/// Copies bytes to a new file, verifies size and optionally SHA-256, then atomically renames
+/// Copies bytes to a new file, verifies size and optionally SHA-256, then renames
 /// the temporary copy to its requested destination. The source is never modified.
+/// When hashing is enabled, the source is hashed both before and after the copy;
+/// this detects a source file changing while it is being copied.
 pub fn copy_verify_rename(
     source: &Path,
     destination: &Path,
     verify_hash: bool,
 ) -> Result<CopyReport, SafeCopyError> {
-    if !source.is_file() {
-        return Err(SafeCopyError::InvalidSource);
-    }
+    if !source.is_file() { return Err(SafeCopyError::InvalidSource); }
 
     let source_canonical = fs::canonicalize(source)?;
-    let destination_normalized = normalized_destination(destination)?;
-    if source_canonical == destination_normalized {
-        return Err(SafeCopyError::SamePath);
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent)?;
     }
+    let destination_normalized = normalized_destination(destination)?;
+    if source_canonical == destination_normalized { return Err(SafeCopyError::SamePath); }
 
-    ensure_trees_are_separate(source, destination)?;
+    ensure_destination_is_outside_source(source, destination)?;
 
     if destination.exists() {
         return Err(SafeCopyError::DestinationExists(destination.display().to_string()));
@@ -109,27 +107,23 @@ pub fn copy_verify_rename(
 
     let required = fs::metadata(source)?.len();
     let parent = destination.parent().unwrap_or_else(|| Path::new("."));
-    fs::create_dir_all(parent)?;
     let available = available_space(parent)?;
     if available < required {
         return Err(SafeCopyError::InsufficientSpace { required, available });
     }
 
+    let source_hash_before = if verify_hash { Some(sha256_file(source)?) } else { None };
+
     let temp = unique_temp_path(parent, destination.file_name().unwrap().to_string_lossy().as_ref());
     let mut input = File::open(source)?;
-    let mut output = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temp)?;
+    let mut output = OpenOptions::new().write(true).create_new(true).open(&temp)?;
 
     let copy_result = (|| -> Result<u64, SafeCopyError> {
         let mut buffer = [0u8; 1024 * 1024];
         let mut copied = 0u64;
         loop {
             let read = input.read(&mut buffer)?;
-            if read == 0 {
-                break;
-            }
+            if read == 0 { break; }
             output.write_all(&buffer[..read])?;
             copied += read as u64;
         }
@@ -154,18 +148,17 @@ pub fn copy_verify_rename(
     }
 
     let source_hash = if verify_hash {
-        Some(sha256_file(source)?)
-    } else {
-        None
-    };
-
-    if let Some(expected) = &source_hash {
+        let after = sha256_file(source)?;
+        let before = source_hash_before.as_ref().expect("hash enabled");
         let actual = sha256_file(&temp)?;
-        if &actual != expected {
+        if &after != before || &actual != before {
             let _ = fs::remove_file(&temp);
             return Err(SafeCopyError::IntegrityMismatch);
         }
-    }
+        Some(after)
+    } else {
+        None
+    };
 
     if destination.exists() {
         let _ = fs::remove_file(&temp);
