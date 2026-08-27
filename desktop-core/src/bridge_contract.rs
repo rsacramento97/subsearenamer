@@ -1,4 +1,4 @@
-//! Stable request/response contract for the future Tauri adapter.
+//! Stable request/response contract shared by the future Tauri adapter.
 //! The core remains UI-agnostic: this module contains no Tauri or browser code.
 
 use serde::{Deserialize, Serialize};
@@ -36,4 +36,5 @@ pub struct RenameJobResult {
     pub completed: u64,
     pub failed: u64,
     pub cancelled: bool,
+    pub errors: Vec<String>,
 }
