@@ -10,6 +10,7 @@ pub mod naming;
 pub mod timezone;
 pub mod filename_plan;
 pub mod metadata;
+pub mod media_probe;
 pub mod executor;
 
 #[derive(Debug, Error)]
