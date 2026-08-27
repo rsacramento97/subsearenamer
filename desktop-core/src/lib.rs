@@ -71,3 +71,23 @@ pub fn copy_verify_rename(source: &Path, destination: &Path, verify_hash: bool) 
     if let Err(error) = fs::rename(&temp, destination) { let _ = fs::remove_file(&temp); return Err(SafeCopyError::Copy(error)); }
     Ok(CopyReport { source: source.to_path_buf(), destination: destination.to_path_buf(), bytes: copied, sha256: source_hash })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn bridge_contract_serializes() {
+        let request = crate::bridge_contract::RenameJobRequest { source_dir: "C:/src".into(), destination_dir: "D:/dst".into(), timezone: "UTC".into(), manual_offset_minutes: Some(-180), verify_hash: true };
+        let value = serde_json::to_value(request).unwrap();
+        assert_eq!(value["sourceDir"], "C:/src");
+        assert_eq!(value["manualOffsetMinutes"], -180);
+    }
+
+    #[test]
+    fn preview_status_serializes_stably() {
+        assert_eq!(serde_json::to_string(&crate::bridge_contract::PreviewStatus::Ready).unwrap(), "\"ready\"");
+        assert_eq!(serde_json::to_string(&crate::bridge_contract::PreviewStatus::Conflict).unwrap(), "\"conflict\"");
+    }
+}
