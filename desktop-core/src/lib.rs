@@ -1,19 +1,31 @@
+use fs2::available_space;
 use sha2::{Digest, Sha256};
-use std::{fs::{self, File}, io::{Read, Write}, path::{Path, PathBuf}};
+use std::{
+    fs::{self, File, OpenOptions},
+    io::{Read, Write},
+    path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
+};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum SafeCopyError {
+    #[error("source does not exist or is not a file")]
+    InvalidSource,
     #[error("source and destination must be different")]
     SamePath,
+    #[error("destination must not be inside the source tree")]
+    DestinationInsideSource,
+    #[error("source must not be inside the destination tree")]
+    SourceInsideDestination,
     #[error("destination already exists: {0}")]
     DestinationExists(String),
-    #[error("insufficient disk space")]
-    InsufficientSpace,
+    #[error("insufficient disk space: required {required} bytes, available {available} bytes")]
+    InsufficientSpace { required: u64, available: u64 },
     #[error("copy failed: {0}")]
     Copy(#[from] std::io::Error),
     #[error("integrity verification failed")]
-    HashMismatch,
+    IntegrityMismatch,
 }
 
 #[derive(Debug, Clone)]
@@ -30,53 +42,145 @@ fn sha256_file(path: &Path) -> Result<String, SafeCopyError> {
     let mut buffer = [0u8; 1024 * 1024];
     loop {
         let read = file.read(&mut buffer)?;
-        if read == 0 { break; }
+        if read == 0 {
+            break;
+        }
         hasher.update(&buffer[..read]);
     }
     Ok(hex::encode(hasher.finalize()))
 }
 
+fn canonical_parent(path: &Path) -> Result<PathBuf, SafeCopyError> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    Ok(fs::canonicalize(parent)?)
+}
+
+fn normalized_destination(path: &Path) -> Result<PathBuf, SafeCopyError> {
+    Ok(canonical_parent(path)?.join(
+        path.file_name().ok_or(SafeCopyError::InvalidSource)?,
+    ))
+}
+
+fn ensure_trees_are_separate(source: &Path, destination: &Path) -> Result<(), SafeCopyError> {
+    let source_root = fs::canonicalize(source)?.parent().map(Path::to_path_buf).ok_or(SafeCopyError::InvalidSource)?;
+    let destination_parent = canonical_parent(destination)?;
+    let source_root = fs::canonicalize(source_root)?;
+    let destination_parent = fs::canonicalize(destination_parent)?;
+
+    if destination_parent.starts_with(&source_root) {
+        return Err(SafeCopyError::DestinationInsideSource);
+    }
+    if source_root.starts_with(&destination_parent) {
+        return Err(SafeCopyError::SourceInsideDestination);
+    }
+    Ok(())
+}
+
+fn unique_temp_path(parent: &Path, final_name: &str) -> PathBuf {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
+    parent.join(format!(".{final_name}.{stamp}-{}.subsea-partial", std::process::id()))
+}
+
 /// Copies bytes to a new file, verifies size and optionally SHA-256, then atomically renames
 /// the temporary copy to its requested destination. The source is never modified.
-pub fn copy_verify_rename(source: &Path, destination: &Path, verify_hash: bool) -> Result<CopyReport, SafeCopyError> {
-    if fs::canonicalize(source).ok() == fs::canonicalize(destination).ok() { return Err(SafeCopyError::SamePath); }
-    if destination.exists() { return Err(SafeCopyError::DestinationExists(destination.display().to_string())); }
-    let metadata = fs::metadata(source)?;
-    let required = metadata.len();
-    let available = fs::metadata(destination.parent().unwrap_or_else(|| Path::new(".")))?.len();
-    let _ = available; // Actual free-space check belongs to the platform adapter.
+pub fn copy_verify_rename(
+    source: &Path,
+    destination: &Path,
+    verify_hash: bool,
+) -> Result<CopyReport, SafeCopyError> {
+    if !source.is_file() {
+        return Err(SafeCopyError::InvalidSource);
+    }
 
+    let source_canonical = fs::canonicalize(source)?;
+    let destination_normalized = normalized_destination(destination)?;
+    if source_canonical == destination_normalized {
+        return Err(SafeCopyError::SamePath);
+    }
+
+    ensure_trees_are_separate(source, destination)?;
+
+    if destination.exists() {
+        return Err(SafeCopyError::DestinationExists(destination.display().to_string()));
+    }
+
+    let required = fs::metadata(source)?.len();
     let parent = destination.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent)?;
-    let temp = parent.join(format!(".{}.subsea-partial", destination.file_name().unwrap().to_string_lossy()));
-    if temp.exists() { fs::remove_file(&temp)?; }
-
-    let mut input = File::open(source)?;
-    let mut output = File::create(&temp)?;
-    let mut buffer = [0u8; 1024 * 1024];
-    let mut copied = 0u64;
-    loop {
-        let read = input.read(&mut buffer)?;
-        if read == 0 { break; }
-        output.write_all(&buffer[..read])?;
-        copied += read as u64;
+    let available = available_space(parent)?;
+    if available < required {
+        return Err(SafeCopyError::InsufficientSpace { required, available });
     }
-    output.sync_all()?;
+
+    let temp = unique_temp_path(parent, destination.file_name().unwrap().to_string_lossy().as_ref());
+    let mut input = File::open(source)?;
+    let mut output = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp)?;
+
+    let copy_result = (|| -> Result<u64, SafeCopyError> {
+        let mut buffer = [0u8; 1024 * 1024];
+        let mut copied = 0u64;
+        loop {
+            let read = input.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            output.write_all(&buffer[..read])?;
+            copied += read as u64;
+        }
+        output.sync_all()?;
+        Ok(copied)
+    })();
+
+    let copied = match copy_result {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            drop(output);
+            let _ = fs::remove_file(&temp);
+            return Err(error);
+        }
+    };
     drop(output);
 
     let copied_size = fs::metadata(&temp)?.len();
-    if copied_size != required {
+    if copied_size != required || copied != required {
         let _ = fs::remove_file(&temp);
-        return Err(SafeCopyError::HashMismatch);
+        return Err(SafeCopyError::IntegrityMismatch);
     }
-    let source_hash = if verify_hash { Some(sha256_file(source)?) } else { None };
+
+    let source_hash = if verify_hash {
+        Some(sha256_file(source)?)
+    } else {
+        None
+    };
+
     if let Some(expected) = &source_hash {
         let actual = sha256_file(&temp)?;
         if &actual != expected {
             let _ = fs::remove_file(&temp);
-            return Err(SafeCopyError::HashMismatch);
+            return Err(SafeCopyError::IntegrityMismatch);
         }
     }
-    fs::rename(&temp, destination)?;
-    Ok(CopyReport { source: source.to_path_buf(), destination: destination.to_path_buf(), bytes: copied, sha256: source_hash })
+
+    if destination.exists() {
+        let _ = fs::remove_file(&temp);
+        return Err(SafeCopyError::DestinationExists(destination.display().to_string()));
+    }
+
+    if let Err(error) = fs::rename(&temp, destination) {
+        let _ = fs::remove_file(&temp);
+        return Err(SafeCopyError::Copy(error));
+    }
+
+    Ok(CopyReport {
+        source: source.to_path_buf(),
+        destination: destination.to_path_buf(),
+        bytes: copied,
+        sha256: source_hash,
+    })
 }
